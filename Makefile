@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -fPIC -std=c11
-LDFLAGS = -lrt -ldl -lpthread
+LDFLAGS = -lrt -ldl -lpthread -lm
 
 SRC_DIR = src
 INC_DIR = include

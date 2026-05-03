@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,4 +95,99 @@ void openspeedy_scale_timespec(const struct timespec *in,
         out->tv_sec--;
         out->tv_nsec += 1000000000L;
     }
+}
+
+/* ── clock_gettime ───────────────────────────────────────────── */
+int clock_gettime(clockid_t clk_id, struct timespec *tp)
+{
+    static struct timespec base_real = {0, 0};
+    static struct timespec base_virtual = {0, 0};
+    static double last_mult = 1.0;
+    static int init = 0;
+
+    if (!real_clock_gettime) openspeedy_init();
+    if (!real_clock_gettime) return -1;
+
+    int ret = real_clock_gettime(clk_id, tp);
+    if (ret != 0) return ret;
+
+    refresh_speed();
+
+    if (!cached_enabled || cached_multiplier == 1.0) {
+        if (cached_multiplier == 1.0) init = 0;
+        return ret;
+    }
+
+    /* Only scale monotonic clocks (not CLOCK_REALTIME) */
+    if (clk_id == CLOCK_MONOTONIC || clk_id == CLOCK_MONOTONIC_RAW ||
+        clk_id == CLOCK_MONOTONIC_COARSE) {
+
+        if (!init) {
+            base_real = *tp;
+            base_virtual = *tp;
+            last_mult = cached_multiplier;
+            init = 1;
+        }
+
+        /* If multiplier changed, rebase to current real time */
+        if (cached_multiplier != last_mult) {
+            base_virtual = *tp;
+            last_mult = cached_multiplier;
+        }
+
+        /* diff = real - base_real */
+        struct timespec diff;
+        diff.tv_sec  = tp->tv_sec  - base_real.tv_sec;
+        diff.tv_nsec = tp->tv_nsec - base_real.tv_nsec;
+        if (diff.tv_nsec < 0) {
+            diff.tv_sec--;
+            diff.tv_nsec += 1000000000L;
+        }
+
+        /* virtual = base_virtual + diff * multiplier */
+        double total_ns = (double)diff.tv_sec * 1e9 + (double)diff.tv_nsec;
+        total_ns *= cached_multiplier;
+
+        tp->tv_sec  = base_virtual.tv_sec  + (time_t)(total_ns / 1e9);
+        tp->tv_nsec = base_virtual.tv_nsec + (long)fmod(total_ns, 1e9);
+
+        if (tp->tv_nsec >= 1000000000L) {
+            tp->tv_sec++;
+            tp->tv_nsec -= 1000000000L;
+        }
+    }
+
+    return ret;
+}
+
+/* ── gettimeofday ────────────────────────────────────────────── */
+int gettimeofday(struct timeval *tv, void *tz)
+{
+    if (!real_gettimeofday) openspeedy_init();
+    if (!real_gettimeofday) return -1;
+
+    int ret = real_gettimeofday(tv, tz);
+    if (ret != 0) return ret;
+
+    refresh_speed();
+    /* gettimeofday is typically wall-clock time.
+     * Most games use clock_gettime(CLOCK_MONOTONIC) instead.
+     * We keep this as a pass-through for now. */
+
+    return ret;
+}
+
+/* ── time ────────────────────────────────────────────────────── */
+time_t time(time_t *t)
+{
+    if (!real_time) openspeedy_init();
+    if (!real_time) return -1;
+
+    time_t result = real_time(NULL);
+
+    refresh_speed();
+    /* Wall-clock: pass through. Games rarely use time() for timing. */
+
+    if (t) *t = result;
+    return result;
 }

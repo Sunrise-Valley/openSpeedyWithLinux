@@ -24,7 +24,7 @@ struct speed_state {
 /* ── Function pointer types for intercepted functions ────────── */
 
 typedef int (*clock_gettime_t)(clockid_t clk_id, struct timespec *tp);
-typedef int (*gettimeofday_t)(struct timeval *tv, struct timezone *tz);
+typedef int (*gettimeofday_t)(struct timeval *tv, void *tz);
 typedef time_t (*time_t_fn)(time_t *t);
 typedef unsigned int (*sleep_t)(unsigned int seconds);
 typedef int (*usleep_t)(useconds_t usec);
