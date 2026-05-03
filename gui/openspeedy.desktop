@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenSpeedy
+Name[zh_CN]=OpenSpeedy 变速器
+Comment=Game Speed Modifier
+Comment[zh_CN]=游戏变速工具
+Exec=/usr/local/bin/openspeedy-gui
+Icon=applications-games
+Terminal=false
+Categories=Game;Utility;
+Keywords=speed;game;变速;加速;

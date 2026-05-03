@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""OpenSpeedy Linux GUI — GTK3 speed modifier control panel."""
+import os
+import sys
+import ctypes
+import struct
+import threading
+import time
+import subprocess
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gtk, GLib, Gdk, Gio
+
+# ── Shared memory protocol (must match include/openspeedy.h) ──────
+SHM_NAME = "/openspeedy_shm"
+SHM_SIZE = 4096
+
+class SpeedState(ctypes.Structure):
+    _fields_ = [
+        ("multiplier", ctypes.c_double),
+        ("enabled", ctypes.c_int),
+        ("cmd_seq", ctypes.c_uint64),
+        ("version", ctypes.c_uint32),
+        ("controller_pid", ctypes.c_int),
+    ]
+
+def read_speed_state():
+    """Read speed state from shared memory. Returns SpeedState or None."""
+    try:
+        fd = os.open(f"/dev/shm{SHM_NAME}", os.O_RDONLY)
+        data = os.read(fd, ctypes.sizeof(SpeedState))
+        os.close(fd)
+        return SpeedState.from_buffer_copy(data)
+    except (OSError, FileNotFoundError):
+        return None
+
+def write_speed_state(state):
+    """Write speed state to shared memory. Returns True on success."""
+    try:
+        fd = os.open(f"/dev/shm{SHM_NAME}", os.O_RDWR | os.O_CREAT, 0o666)
+        os.ftruncate(fd, SHM_SIZE)
+        os.pwrite(fd, bytes(state), 0)
+        os.close(fd)
+        return True
+    except OSError:
+        return False
+
+def set_speed(multiplier):
+    """Set the speed multiplier via shared memory."""
+    existing = read_speed_state()
+    if existing is None:
+        state = SpeedState()
+        state.version = 1
+        state.multiplier = 1.0
+        state.enabled = 0
+        state.cmd_seq = 0
+        state.controller_pid = os.getpid()
+    else:
+        state = existing
+
+    state.multiplier = multiplier
+    state.enabled = 1 if multiplier != 1.0 else 0
+    state.cmd_seq += 1
+    state.controller_pid = os.getpid()
+    return write_speed_state(state)
+
+def disable_speed():
+    """Disable speed modifier but keep multiplier."""
+    existing = read_speed_state()
+    if existing is None:
+        return False
+    existing.enabled = 0
+    existing.cmd_seq += 1
+    return write_speed_state(existing)
+
+def get_system_info():
+    """Get CPU and memory usage from /proc."""
+    info = {"cpu": 0.0, "mem_used": 0.0, "mem_total": 0.0, "os": ""}
+
+    # OS version
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    info["os"] = line.split("=", 1)[1].strip().strip('"')
+                    break
+    except Exception:
+        info["os"] = "Linux"
+
+    # Memory (simple read from /proc/meminfo)
+    try:
+        mem_total = 0
+        mem_available = 0
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    mem_total = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    mem_available = int(line.split()[1])
+                    break
+        info["mem_total"] = mem_total / 1024 / 1024  # Convert to GB
+        info["mem_used"] = (mem_total - mem_available) / 1024 / 1024
+    except Exception:
+        pass
+
+    # CPU (simple sampling)
+    try:
+        with open("/proc/stat") as f:
+            fields = f.readline().split()
+        total = sum(int(x) for x in fields[1:])
+        idle = int(fields[4])
+        # Return idle% for now; caller computes usage
+        info["_cpu_idle"] = idle
+        info["_cpu_total"] = total
+    except Exception:
+        pass
+
+    return info
+
+
+# ── Process List ──────────────────────────────────────────────────
+def get_processes():
+    """Get list of running processes with PIDs and names."""
+    procs = []
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                pid = int(entry)
+                with open(f"/proc/{pid}/comm") as f:
+                    name = f.read().strip()
+                procs.append((pid, name))
+            except (OSError, PermissionError):
+                continue
+    except Exception:
+        pass
+    return sorted(procs, key=lambda x: x[1].lower())
+
+
+# ── Main Window ───────────────────────────────────────────────────
+class OpenSpeedyWindow(Gtk.Window):
+    def __init__(self):
+        Gtk.Window.__init__(self, title="OpenSpeedy")
+        self.set_default_size(800, 600)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.connect("delete-event", self.on_delete_event)
+
+        # CSS
+        css_provider = Gtk.CssProvider()
+        css_provider.load_from_data(b"""
+            .speed-label { font-size: 24px; font-weight: bold; }
+            .speed-value { font-size: 20px; color: #3584e4; }
+            .group-title { font-weight: bold; font-size: 13px; }
+            .info-label { font-size: 12px; }
+            .info-value { font-size: 12px; }
+            .status-ok { color: #33d17a; }
+            .status-err { color: #e01b24; }
+            .statusbar { font-size: 11px; }
+        """)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self._prev_cpu = None
+        self.slider_dragging = False
+
+        self._build_ui()
+        self._start_refresh_timer()
+
+    def _build_ui(self):
+        # ── Main vertical box ──
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(main_box)
+
+        # ── Header bar area (menu + title) ──
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        header.set_title("OpenSpeedy")
+        header.set_subtitle("Linux Edition")
+
+        # About button
+        about_btn = Gtk.Button.new_from_icon_name(
+            "help-about-symbolic", Gtk.IconSize.BUTTON)
+        about_btn.connect("clicked", self._on_about)
+        header.pack_end(about_btn)
+
+        # Reset button
+        reset_btn = Gtk.Button.new_with_label("重置")
+        reset_btn.connect("clicked", self._on_reset)
+        header.pack_start(reset_btn)
+
+        self.set_titlebar(header)
+
+        # ── Content area ──
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        content.set_border_width(12)
+        main_box.pack_start(content, True, True, 0)
+
+        # ── LEFT: Speed control ──
+        left_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        left_panel.set_size_request(220, -1)
+        content.pack_start(left_panel, False, False, 0)
+
+        # Speed group frame
+        speed_frame = Gtk.Frame()
+        speed_frame.set_label("⚡ 变速速率")
+        speed_frame.get_label_widget().get_style_context().add_class("group-title")
+        left_panel.pack_start(speed_frame, True, True, 0)
+
+        speed_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        speed_box.set_border_width(10)
+        speed_frame.add(speed_box)
+
+        # Auto-start checkbox
+        self.autostart_cb = Gtk.CheckButton.new_with_label("开机自启")
+        self.autostart_cb.connect("toggled", self._on_autostart_toggle)
+        self.autostart_cb.set_active(self._check_autostart())
+        speed_box.pack_start(self.autostart_cb, False, False, 0)
+
+        # Speed slider (vertical)
+        slider_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        speed_box.pack_start(slider_box, True, True, 0)
+
+        self.slider = Gtk.Scale.new_with_range(
+            Gtk.Orientation.VERTICAL, -50, 400)
+        self.slider.set_inverted(True)  # Top = max speed
+        self.slider.set_value(0)
+        self.slider.set_size_request(60, 250)
+        self.slider.set_draw_value(False)
+        self.slider.add_mark(0, Gtk.PositionType.RIGHT, "1x")
+        self.slider.add_mark(100, Gtk.PositionType.RIGHT, "2x")
+        self.slider.add_mark(200, Gtk.PositionType.RIGHT, "5x")
+        self.slider.add_mark(300, Gtk.PositionType.RIGHT, "10x")
+        self.slider.add_mark(400, Gtk.PositionType.RIGHT, "50x")
+        self.slider.connect("value-changed", self._on_slider_changed)
+        self.slider.connect("button-press-event", lambda w, e: setattr(self, 'slider_dragging', True))
+        self.slider.connect("button-release-event", self._on_slider_released)
+        slider_box.pack_start(self.slider, False, False, 0)
+
+        # Speed multiplier display + spinbox
+        speed_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        slider_box.pack_start(speed_info, True, True, 0)
+
+        self.speed_label = Gtk.Label(label="✖️1.00倍")
+        self.speed_label.get_style_context().add_class("speed-label")
+        self.speed_label.set_xalign(0)
+        speed_info.pack_start(self.speed_label, False, False, 0)
+
+        spin_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        speed_info.pack_start(spin_row, False, False, 0)
+
+        self.spinbox = Gtk.SpinButton.new_with_range(0.01, 100.0, 0.1)
+        self.spinbox.set_value(1.0)
+        self.spinbox.set_digits(2)
+        self.spinbox.connect("value-changed", self._on_spinbox_changed)
+        self.spinbox.connect("activate", self._on_spinbox_activate)
+        spin_row.pack_start(self.spinbox, True, True, 0)
+
+        apply_btn = Gtk.Button.new_with_label("应用")
+        apply_btn.connect("clicked", self._on_apply_clicked)
+        spin_row.pack_start(apply_btn, False, False, 0)
+
+        # ── System info panel ──
+        sys_frame = Gtk.Frame()
+        sys_frame.set_label("📊 系统信息")
+        sys_frame.get_label_widget().get_style_context().add_class("group-title")
+        left_panel.pack_start(sys_frame, False, False, 0)
+
+        sys_grid = Gtk.Grid()
+        sys_grid.set_border_width(8)
+        sys_grid.set_row_spacing(6)
+        sys_grid.set_column_spacing(8)
+        sys_frame.add(sys_grid)
+
+        # OS
+        os_icon = Gtk.Label(label="🖥️")
+        sys_grid.attach(os_icon, 0, 0, 1, 1)
+        os_lbl = Gtk.Label(label="操作系统")
+        os_lbl.set_xalign(0)
+        sys_grid.attach(os_lbl, 1, 0, 1, 1)
+        self.os_value = Gtk.Label(label="Linux")
+        self.os_value.set_xalign(1)
+        self.os_value.get_style_context().add_class("info-value")
+        sys_grid.attach(self.os_value, 2, 0, 1, 1)
+
+        # CPU
+        cpu_icon = Gtk.Label(label="🔥")
+        sys_grid.attach(cpu_icon, 0, 1, 1, 1)
+        cpu_lbl = Gtk.Label(label="CPU")
+        cpu_lbl.set_xalign(0)
+        sys_grid.attach(cpu_lbl, 1, 1, 1, 1)
+        self.cpu_value = Gtk.Label(label="0.0%")
+        self.cpu_value.set_xalign(1)
+        self.cpu_value.get_style_context().add_class("info-value")
+        sys_grid.attach(self.cpu_value, 2, 1, 1, 1)
+
+        # Memory
+        mem_icon = Gtk.Label(label="📊")
+        sys_grid.attach(mem_icon, 0, 2, 1, 1)
+        mem_lbl = Gtk.Label(label="内存")
+        mem_lbl.set_xalign(0)
+        sys_grid.attach(mem_lbl, 1, 2, 1, 1)
+        self.mem_value = Gtk.Label(label="0G / 0G")
+        self.mem_value.set_xalign(1)
+        self.mem_value.get_style_context().add_class("info-value")
+        sys_grid.attach(self.mem_value, 2, 2, 1, 1)
+
+        # LD_PRELOAD status
+        ld_icon = Gtk.Label(label="🔗")
+        sys_grid.attach(ld_icon, 0, 3, 1, 1)
+        ld_lbl = Gtk.Label(label="LD_PRELOAD")
+        ld_lbl.set_xalign(0)
+        sys_grid.attach(ld_lbl, 1, 3, 1, 1)
+        self.ld_value = Gtk.Label(label="正常")
+        self.ld_value.set_xalign(1)
+        self.ld_value.get_style_context().add_class("status-ok")
+        sys_grid.attach(self.ld_value, 2, 3, 1, 1)
+
+        # ── RIGHT: Process list ──
+        right_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        content.pack_start(right_panel, True, True, 0)
+
+        proc_frame = Gtk.Frame()
+        proc_frame.set_label("📋 进程列表")
+        proc_frame.get_label_widget().get_style_context().add_class("group-title")
+        right_panel.pack_start(proc_frame, True, True, 0)
+
+        proc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        proc_box.set_border_width(8)
+        proc_frame.add(proc_box)
+
+        # Filter
+        filter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        proc_box.pack_start(filter_box, False, False, 0)
+        filter_lbl = Gtk.Label(label="过滤:")
+        filter_box.pack_start(filter_lbl, False, False, 0)
+        self.filter_entry = Gtk.SearchEntry()
+        self.filter_entry.set_placeholder_text("输入进程名过滤...")
+        self.filter_entry.connect("search-changed", self._on_filter_changed)
+        filter_box.pack_start(self.filter_entry, True, True, 0)
+
+        refresh_btn = Gtk.Button.new_from_icon_name(
+            "view-refresh-symbolic", Gtk.IconSize.BUTTON)
+        refresh_btn.set_tooltip_text("刷新进程列表")
+        refresh_btn.connect("clicked", self._refresh_process_list)
+        filter_box.pack_start(refresh_btn, False, False, 0)
+
+        # Process treeview
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        proc_box.pack_start(scroll, True, True, 0)
+
+        self.proc_store = Gtk.ListStore(int, str)  # PID, Name
+        self.proc_view = Gtk.TreeView(model=self.proc_store)
+        self.proc_view.set_enable_search(False)
+
+        # PID column
+        pid_col = Gtk.TreeViewColumn("PID")
+        pid_cell = Gtk.CellRendererText()
+        pid_col.pack_start(pid_cell, True)
+        pid_col.add_attribute(pid_cell, "text", 0)
+        pid_col.set_fixed_width(80)
+        self.proc_view.append_column(pid_col)
+
+        # Name column
+        name_col = Gtk.TreeViewColumn("进程名")
+        name_cell = Gtk.CellRendererText()
+        name_col.pack_start(name_cell, True)
+        name_col.add_attribute(name_cell, "text", 1)
+        self.proc_view.append_column(name_col)
+
+        # Double-click to run with speed mod
+        self.proc_view.connect("row-activated", self._on_process_activated)
+
+        scroll.add(self.proc_view)
+        self._refresh_process_list()
+
+        # ── Status bar ──
+        self.statusbar = Gtk.Statusbar()
+        self.statusbar.get_style_context().add_class("statusbar")
+        main_box.pack_end(self.statusbar, False, False, 0)
+        self.statusbar.push(0, "就绪 — 选择进程并设置速度")
+
+        # ── Tray icon ──
+        self._setup_tray()
+
+    def _setup_tray(self):
+        self.tray = Gtk.StatusIcon.new_from_icon_name("applications-games-symbolic")
+        self.tray.set_tooltip_text("OpenSpeedy")
+        self.tray.connect("activate", self._on_tray_activate)
+        self.tray.connect("popup-menu", self._on_tray_popup)
+        self.tray.set_visible(True)
+
+    def _on_tray_activate(self, tray):
+        if self.get_property("visible"):
+            self.hide()
+        else:
+            self.show()
+            self.present()
+
+    def _on_tray_popup(self, tray, button, time):
+        menu = Gtk.Menu()
+        show_item = Gtk.MenuItem(label="显示")
+        show_item.connect("activate", lambda w: (self.show(), self.present()))
+        menu.append(show_item)
+        hide_item = Gtk.MenuItem(label="隐藏")
+        hide_item.connect("activate", lambda w: self.hide())
+        menu.append(hide_item)
+        menu.append(Gtk.SeparatorMenuItem())
+        quit_item = Gtk.MenuItem(label="退出")
+        quit_item.connect("activate", lambda w: (self.hide(), Gtk.main_quit()))
+        menu.append(quit_item)
+        menu.show_all()
+        menu.popup(None, None, None, None, button, time)
+
+    def on_delete_event(self, widget, event):
+        """Minimize to tray instead of closing."""
+        self.hide()
+        return True  # Don't destroy
+
+    # ── Slider logic ──────────────────────────────────────────
+    def slider_to_factor(self, value):
+        """Convert slider position to speed multiplier."""
+        if value <= 0:
+            return max(0.01, 1.0 + value / 50.0)  # 0→1x, -50→0.01x
+        elif value <= 40:
+            return 1.0 + value / 100.0 * 0.5       # 0→1x, 40→1.2x
+        elif value <= 100:
+            return 1.2 + (value - 40) / 60.0 * 0.8  # 40→1.2x, 100→2x
+        elif value <= 200:
+            return 2.0 + (value - 100) / 100.0 * 3.0  # 100→2x, 200→5x
+        elif value <= 300:
+            return 5.0 + (value - 200) / 100.0 * 5.0  # 200→5x, 300→10x
+        else:
+            return 10.0 + (value - 300) / 100.0 * 40.0  # 300→10x, 400→50x
+
+    def factor_to_slider(self, factor):
+        """Convert speed multiplier to slider position."""
+        if factor <= 1.0:
+            return int((factor - 1.0) * 50.0)  # 0.01x→-50, 1x→0
+        elif factor <= 1.2:
+            return int((factor - 1.0) / 0.5 * 40.0)  # 1x→0, 1.2x→40
+        elif factor <= 2.0:
+            return int(40 + (factor - 1.2) / 0.8 * 60.0)  # 1.2x→40, 2x→100
+        elif factor <= 5.0:
+            return int(100 + (factor - 2.0) / 3.0 * 100.0)  # 2x→100, 5x→200
+        elif factor <= 10.0:
+            return int(200 + (factor - 5.0) / 5.0 * 100.0)  # 5x→200, 10x→300
+        else:
+            return int(300 + (factor - 10.0) / 40.0 * 100.0)  # 10x→300, 50x→400
+
+    def _on_slider_changed(self, slider):
+        factor = self.slider_to_factor(slider.get_value())
+        self.spinbox.set_value(factor)
+        self.speed_label.set_text(f"✖️{factor:.2f}倍")
+        # Apply immediately only if dragging ends; value-changed fires during drag too
+
+    def _on_slider_released(self, slider, event):
+        factor = self.slider_to_factor(slider.get_value())
+        self._apply_speed(factor)
+
+    def _on_spinbox_changed(self, spin):
+        factor = spin.get_value()
+        slider_val = self.factor_to_slider(factor)
+        self.slider.set_value(slider_val)
+        self.speed_label.set_text(f"✖️{factor:.2f}倍")
+
+    def _on_spinbox_activate(self, spin):
+        self._apply_speed(spin.get_value())
+
+    def _on_apply_clicked(self, btn):
+        self._apply_speed(self.spinbox.get_value())
+
+    def _apply_speed(self, factor):
+        if factor == 1.0:
+            disable_speed()
+            self.statusbar.push(0, "速度已重置为 1.00x")
+        else:
+            set_speed(factor)
+            self.statusbar.push(0, f"速度已设置为 {factor:.2f}x")
+
+    def _on_reset(self, btn):
+        """Reset speed to 1.0x."""
+        disable_speed()
+        self.slider.set_value(0)
+        self.spinbox.set_value(1.0)
+        self.speed_label.set_text("✖️1.00倍")
+        self.statusbar.push(0, "速度已重置为 1.00x")
+
+    # ── Process list ──────────────────────────────────────────
+    def _refresh_process_list(self, *args):
+        """Refresh process list from /proc."""
+        filter_text = self.filter_entry.get_text().lower() if hasattr(self, 'filter_entry') else ""
+
+        self.proc_store.clear()
+        for pid, name in get_processes():
+            if not filter_text or filter_text in name.lower():
+                self.proc_store.append([pid, name])
+
+    def _on_filter_changed(self, entry):
+        self._refresh_process_list()
+
+    def _on_process_activated(self, view, path, column):
+        """Double-click a process to launch it with speed mod."""
+        model = view.get_model()
+        pid = model[path][0]
+        name = model[path][1]
+        # Apply current speed first
+        current_factor = self.spinbox.get_value()
+        if current_factor != 1.0:
+            set_speed(current_factor)
+
+        # Notify user — they need to start the game with LD_PRELOAD
+        dialog = Gtk.MessageDialog(
+            parent=self,
+            flags=Gtk.DialogFlags.MODAL,
+            type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            message_format=f"要对 {name} (PID: {pid}) 应用变速吗？"
+        )
+        dialog.format_secondary_text(
+            "OpenSpeedy 通过 LD_PRELOAD 机制工作。\n"
+            "请在启动游戏时设置环境变量：\n\n"
+            "  LD_PRELOAD=./build/libopenspeedy.so ./your_game\n\n"
+            "或在终端运行:\n"
+            "  speedctl run ./your_game"
+        )
+        dialog.run()
+        dialog.destroy()
+
+    # ── Auto-start ────────────────────────────────────────────
+    def _check_autostart(self):
+        """Check if autostart .desktop file exists."""
+        autostart_path = os.path.expanduser(
+            "~/.config/autostart/openspeedy.desktop")
+        return os.path.exists(autostart_path)
+
+    def _on_autostart_toggle(self, cb):
+        """Enable/disable autostart via .desktop file."""
+        autostart_dir = os.path.expanduser("~/.config/autostart")
+        autostart_path = os.path.join(autostart_dir, "openspeedy.desktop")
+
+        if cb.get_active():
+            os.makedirs(autostart_dir, exist_ok=True)
+            desktop_entry = f"""[Desktop Entry]
+Type=Application
+Name=OpenSpeedy
+Comment=Game Speed Modifier
+Exec={sys.argv[0]}
+Icon=applications-games
+Terminal=false
+Categories=Game;Utility;
+X-GNOME-Autostart-enabled=true
+"""
+            with open(autostart_path, "w") as f:
+                f.write(desktop_entry)
+            self.statusbar.push(0, "已启用开机自启")
+        else:
+            try:
+                os.remove(autostart_path)
+                self.statusbar.push(0, "已禁用开机自启")
+            except FileNotFoundError:
+                pass
+
+    # ── About dialog ──────────────────────────────────────────
+    def _on_about(self, btn):
+        dialog = Gtk.AboutDialog()
+        dialog.set_program_name("OpenSpeedy Linux")
+        dialog.set_version("0.2.0")
+        dialog.set_comments("开源免费的游戏变速工具 — Linux 版")
+        dialog.set_license_type(Gtk.License.GPL_3_0)
+        dialog.set_website("https://github.com/Sunrise-Valley/openSpeedyWithLinux")
+        dialog.set_authors(["Sunrise-Valley", "game1024 (原版 Windows)"])
+        dialog.run()
+        dialog.destroy()
+
+    # ── Periodic refresh ──────────────────────────────────────
+    def _start_refresh_timer(self):
+        """Start timer to refresh system info every 2 seconds."""
+        GLib.timeout_add(2000, self._refresh_sysinfo)
+
+    def _refresh_sysinfo(self):
+        """Update system info display."""
+        try:
+            info = get_system_info()
+
+            # OS
+            if info["os"]:
+                self.os_value.set_text(info["os"])
+
+            # CPU usage
+            if info.get("_cpu_idle"):
+                idle = info["_cpu_idle"]
+                total = info["_cpu_total"]
+                if self._prev_cpu:
+                    prev_idle, prev_total = self._prev_cpu
+                    idle_diff = idle - prev_idle
+                    total_diff = total - prev_total
+                    if total_diff > 0:
+                        usage = (1.0 - idle_diff / total_diff) * 100
+                        self.cpu_value.set_text(f"{usage:5.1f}%")
+                self._prev_cpu = (idle, total)
+
+            # Memory
+            if info["mem_total"] > 0:
+                self.mem_value.set_text(
+                    f"({info['mem_used']:.1f}G / {info['mem_total']:.1f}G) "
+                    f"{info['mem_used']/info['mem_total']*100:.1f}%"
+                )
+
+            # Check LD_PRELOAD status
+            state = read_speed_state()
+            if state and state.enabled:
+                self.ld_value.set_text(f"激活 ({state.multiplier:.2f}x)")
+                self.ld_value.get_style_context().remove_class("status-ok")
+                self.ld_value.get_style_context().add_class("status-err")
+            else:
+                self.ld_value.set_text("正常")
+                self.ld_value.get_style_context().remove_class("status-err")
+                self.ld_value.get_style_context().add_class("status-ok")
+        except Exception:
+            pass
+        return True  # Keep timer running
+
+
+# ── Entry point ───────────────────────────────────────────────────
+def main():
+    window = OpenSpeedyWindow()
+    window.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

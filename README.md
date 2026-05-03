@@ -35,10 +35,26 @@ make
 
 ## 使用
 
-```bash
-# 构建
-make
+### 图形界面（推荐）
 
+```bash
+# 安装后可运行
+openspeedy-gui
+
+# 或直接运行
+./gui/openspeedy-gui
+```
+
+功能：
+- 🎚️ 滑块或输入框设置速度倍率（0.01x ~ 50x）
+- 📋 进程列表浏览
+- 📊 实时 CPU/内存/OS 信息
+- 🔗 LD_PRELOAD 状态指示
+- 📌 系统托盘 + 开机自启
+
+### 命令行
+
+```bash
 # 查看状态
 ./build/speedctl status
 
