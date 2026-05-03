@@ -1,8 +1,12 @@
 #ifndef OPENSPEEDY_H
 #define OPENSPEEDY_H
 
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <time.h>
+#include <sys/time.h>
+#include <sys/select.h>
+#include <poll.h>
 
 /* ── Shared Memory Protocol ─────────────────────────────────── */
 
