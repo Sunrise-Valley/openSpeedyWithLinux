@@ -191,3 +191,67 @@ time_t time(time_t *t)
     if (t) *t = result;
     return result;
 }
+
+/* ── sleep ───────────────────────────────────────────────────── */
+unsigned int sleep(unsigned int seconds)
+{
+    if (!real_sleep) openspeedy_init();
+    if (!real_sleep) return seconds;
+
+    refresh_speed();
+
+    if (!cached_enabled || cached_multiplier == 1.0)
+        return real_sleep(seconds);
+
+    double scaled = (double)seconds / cached_multiplier;
+    unsigned int s = (unsigned int)scaled;
+    double rem_ns = (scaled - (double)s) * 1e9;
+
+    unsigned int remaining = real_sleep(s);
+    if (remaining > 0)
+        return (unsigned int)((double)remaining * cached_multiplier);
+
+    if (rem_ns > 0 && real_nanosleep) {
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = (long)rem_ns };
+        real_nanosleep(&ts, NULL);
+    }
+
+    return 0;
+}
+
+/* ── usleep ──────────────────────────────────────────────────── */
+int usleep(useconds_t usec)
+{
+    if (!real_usleep) openspeedy_init();
+    if (!real_usleep) return -1;
+
+    refresh_speed();
+
+    if (!cached_enabled || cached_multiplier == 1.0)
+        return real_usleep(usec);
+
+    double scaled = (double)usec / cached_multiplier;
+    return real_usleep((useconds_t)scaled);
+}
+
+/* ── nanosleep ───────────────────────────────────────────────── */
+int nanosleep(const struct timespec *req, struct timespec *rem)
+{
+    if (!real_nanosleep) openspeedy_init();
+    if (!real_nanosleep) return -1;
+
+    refresh_speed();
+
+    if (!cached_enabled || cached_multiplier == 1.0)
+        return real_nanosleep(req, rem);
+
+    /* Scale sleep duration: shorter sleep for faster speed */
+    double total_ns = (double)req->tv_sec * 1e9 + (double)req->tv_nsec;
+    total_ns /= cached_multiplier;
+
+    struct timespec scaled;
+    scaled.tv_sec  = (time_t)(total_ns / 1e9);
+    scaled.tv_nsec = (long)(total_ns - (double)scaled.tv_sec * 1e9);
+
+    return real_nanosleep(&scaled, rem);
+}
