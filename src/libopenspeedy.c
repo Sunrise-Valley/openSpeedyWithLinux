@@ -255,3 +255,42 @@ int nanosleep(const struct timespec *req, struct timespec *rem)
 
     return real_nanosleep(&scaled, rem);
 }
+
+/* ── poll ────────────────────────────────────────────────────── */
+int poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+    if (!real_poll) openspeedy_init();
+    if (!real_poll) return -1;
+
+    refresh_speed();
+
+    if (!cached_enabled || cached_multiplier == 1.0 || timeout <= 0)
+        return real_poll(fds, nfds, timeout);
+
+    int scaled_timeout = (int)((double)timeout / cached_multiplier);
+    if (scaled_timeout < 1 && timeout > 0)
+        scaled_timeout = 1;
+
+    return real_poll(fds, nfds, scaled_timeout);
+}
+
+/* ── select ──────────────────────────────────────────────────── */
+int select(int nfds, fd_set *readfds, fd_set *writefds,
+           fd_set *exceptfds, struct timeval *timeout)
+{
+    if (!real_select) openspeedy_init();
+    if (!real_select) return -1;
+
+    refresh_speed();
+
+    if (!cached_enabled || cached_multiplier == 1.0 || !timeout)
+        return real_select(nfds, readfds, writefds, exceptfds, timeout);
+
+    struct timeval scaled = *timeout;
+    double total_us = (double)scaled.tv_sec * 1e6 + (double)scaled.tv_usec;
+    total_us /= cached_multiplier;
+    scaled.tv_sec  = (time_t)(total_us / 1e6);
+    scaled.tv_usec = (suseconds_t)(total_us - (double)scaled.tv_sec * 1e6);
+
+    return real_select(nfds, readfds, writefds, exceptfds, &scaled);
+}
