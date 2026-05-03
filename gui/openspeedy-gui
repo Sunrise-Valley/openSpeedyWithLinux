@@ -569,7 +569,7 @@ X-GNOME-Autostart-enabled=true
     def _on_about(self, btn):
         dialog = Gtk.AboutDialog()
         dialog.set_program_name("OpenSpeedy Linux")
-        dialog.set_version("0.2.0")
+        dialog.set_version("0.3.0")
         dialog.set_comments("开源免费的游戏变速工具 — Linux 版")
         dialog.set_license_type(Gtk.License.GPL_3_0)
         dialog.set_website("https://github.com/Sunrise-Valley/openSpeedyWithLinux")

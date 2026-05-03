@@ -54,11 +54,11 @@ install: all
 # Build release tarball
 release: all
 	@rm -rf /tmp/openspeedy-release
-	@mkdir -p /tmp/openspeedy-release/openSpeedy-linux-v0.2.0
+	@mkdir -p /tmp/openspeedy-release/openSpeedy-linux-v0.3.0
 	@cp $(BUILD_DIR)/libopenspeedy.so $(BUILD_DIR)/speedctl \
 	    gui/openspeedy-gui gui/openspeedy.desktop \
-	    README.md /tmp/openspeedy-release/openSpeedy-linux-v0.2.0/
-	@chmod +x /tmp/openspeedy-release/openSpeedy-linux-v0.2.0/openspeedy-gui
-	@cd /tmp/openspeedy-release && tar czf openSpeedy-linux-v0.2.0.tar.gz openSpeedy-linux-v0.2.0/
-	@echo "Release: /tmp/openspeedy-release/openSpeedy-linux-v0.2.0.tar.gz"
-	@ls -lh /tmp/openspeedy-release/openSpeedy-linux-v0.2.0.tar.gz
+	    README.md /tmp/openspeedy-release/openSpeedy-linux-v0.3.0/
+	@chmod +x /tmp/openspeedy-release/openSpeedy-linux-v0.3.0/openspeedy-gui
+	@cd /tmp/openspeedy-release && tar czf openSpeedy-linux-v0.3.0.tar.gz openSpeedy-linux-v0.3.0/
+	@echo "Release: /tmp/openspeedy-release/openSpeedy-linux-v0.3.0.tar.gz"
+	@ls -lh /tmp/openspeedy-release/openSpeedy-linux-v0.3.0.tar.gz
