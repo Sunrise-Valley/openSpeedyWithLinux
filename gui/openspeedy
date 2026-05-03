@@ -1,0 +1,40 @@
+#!/bin/bash
+# OpenSpeedy Linux — 一键游戏变速启动器
+# 用法: ./openspeedy <倍率> <程序> [参数...]
+#   ./openspeedy 2.0 ./my_game
+#   ./openspeedy 0.5 steam steam://rungameid/12345
+
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SPEEDCTL="$HERE/speedctl"
+LIB="$HERE/libopenspeedy.so"
+
+if [ $# -lt 2 ]; then
+    cat <<EOF
+OpenSpeedy Linux v0.3.0 — 游戏变速工具
+
+用法:  openspeedy <倍率> <程序> [参数...]
+
+示例:
+  openspeedy 2.0 ./my_game          2倍速运行
+  openspeedy 0.5 ./my_game          半速运行
+  openspeedy 3.0 steam steam://rungameid/730
+
+图形界面:  openspeedy-gui
+命令行:    speedctl set 2.0
+           speedctl run ./my_game
+           speedctl status
+EOF
+    exit 1
+fi
+
+MULT="$1"
+shift
+
+# 设置速度
+"$SPEEDCTL" set "$MULT"
+
+# 启动游戏（带 LD_PRELOAD）
+export LD_PRELOAD="$LIB"
+exec "$@"
