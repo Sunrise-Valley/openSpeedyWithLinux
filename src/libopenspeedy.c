@@ -25,10 +25,13 @@ static double   cached_multiplier = 1.0;
 static int      cached_enabled    = 0;
 static uint64_t cached_seq        = 0;
 
-/* ── Initialize: load original function pointers (called once) ─ */
-__attribute__((constructor))
+/* ── Initialize: load original function pointers (lazy, on first call) ─ */
+static int init_done = 0;
+
 static void openspeedy_init(void)
 {
+    if (init_done) return;
+
     real_clock_gettime = (clock_gettime_t)dlsym(RTLD_NEXT, "clock_gettime");
     real_gettimeofday  = (gettimeofday_t)dlsym(RTLD_NEXT, "gettimeofday");
     real_time          = (time_t_fn)dlsym(RTLD_NEXT, "time");
@@ -38,6 +41,8 @@ static void openspeedy_init(void)
     real_poll          = (poll_t)dlsym(RTLD_NEXT, "poll");
     real_select        = (select_t)dlsym(RTLD_NEXT, "select");
     real_clock_getres  = (clock_getres_t)dlsym(RTLD_NEXT, "clock_getres");
+
+    init_done = 1;
 }
 
 /* ── Read shared memory, update cache if cmd_seq changed ─────── */

@@ -9,7 +9,8 @@ TEST_DIR = tests
 
 .PHONY: all clean test
 
-all: $(BUILD_DIR)/libopenspeedy.so $(BUILD_DIR)/speedctl
+all: $(BUILD_DIR)/libopenspeedy.so $(BUILD_DIR)/speedctl \
+     $(BUILD_DIR)/test_sleep $(BUILD_DIR)/test_time
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
