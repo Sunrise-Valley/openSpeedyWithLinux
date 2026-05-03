@@ -26,8 +26,8 @@ OpenSpeedy 的 Linux 移植版 —— 开源免费的游戏变速工具。
 ## 安装
 
 ```bash
-git clone https://github.com/sunriseliu/openSpeedy_linux.git
-cd openSpeedy_linux
+git clone git@github.com:Sunrise-Valley/openSpeedyWithLinux.git
+cd openSpeedyWithLinux
 make
 ```
 
