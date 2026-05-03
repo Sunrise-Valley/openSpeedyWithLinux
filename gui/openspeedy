@@ -12,7 +12,7 @@ LIB="$HERE/libopenspeedy.so"
 
 if [ $# -lt 2 ]; then
     cat <<EOF
-OpenSpeedy Linux v0.4.0 — 游戏变速工具
+OpenSpeedy Linux v0.5.0 — 游戏变速工具
 
 用法:  openspeedy <倍率> <程序> [参数...]
 

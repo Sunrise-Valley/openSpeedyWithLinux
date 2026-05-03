@@ -54,12 +54,12 @@ install: all
 # Build release tarball
 release: all
 	@rm -rf /tmp/openspeedy-release
-	@mkdir -p /tmp/openspeedy-release/openSpeedy-linux-v0.4.0
+	@mkdir -p /tmp/openspeedy-release/openSpeedy-linux-v0.5.0
 	@cp $(BUILD_DIR)/libopenspeedy.so $(BUILD_DIR)/speedctl \
 	    gui/openspeedy-gui gui/openspeedy gui/openspeedy.desktop \
-	    README.md /tmp/openspeedy-release/openSpeedy-linux-v0.4.0/
-	@chmod +x /tmp/openspeedy-release/openSpeedy-linux-v0.4.0/openspeedy-gui
-	@chmod +x /tmp/openspeedy-release/openSpeedy-linux-v0.4.0/openspeedy
-	@cd /tmp/openspeedy-release && tar czf openSpeedy-linux-v0.4.0.tar.gz openSpeedy-linux-v0.4.0/
-	@echo "Release: /tmp/openspeedy-release/openSpeedy-linux-v0.4.0.tar.gz"
-	@ls -lh /tmp/openspeedy-release/openSpeedy-linux-v0.4.0.tar.gz
+	    README.md /tmp/openspeedy-release/openSpeedy-linux-v0.5.0/
+	@chmod +x /tmp/openspeedy-release/openSpeedy-linux-v0.5.0/openspeedy-gui
+	@chmod +x /tmp/openspeedy-release/openSpeedy-linux-v0.5.0/openspeedy
+	@cd /tmp/openspeedy-release && tar czf openSpeedy-linux-v0.5.0.tar.gz openSpeedy-linux-v0.5.0/
+	@echo "Release: /tmp/openspeedy-release/openSpeedy-linux-v0.5.0.tar.gz"
+	@ls -lh /tmp/openspeedy-release/openSpeedy-linux-v0.5.0.tar.gz
